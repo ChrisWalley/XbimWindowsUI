@@ -299,7 +299,7 @@ namespace Xbim.Presentation
             }
         }
 
-        protected void ViewSpatialStructure()
+        public void ViewSpatialStructure()
         {
             var project = Model.Instances.OfType<IIfcProject>().FirstOrDefault();
             if (project != null)

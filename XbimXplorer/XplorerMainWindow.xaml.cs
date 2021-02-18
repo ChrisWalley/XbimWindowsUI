@@ -46,6 +46,10 @@ using Serilog.Core;
 using Serilog.Events;
 using Xbim.IO;
 using Xbim.Geometry.Engine.Interop;
+using System.Data;
+using System.Data.OleDb;
+using ExcelDataReader;
+using System.Threading;
 
 #endregion
 
@@ -74,14 +78,43 @@ namespace XbimXplorer
 
         private string _openedModelFileName;
 
+        private string lastSelectedGroup = "";
+
+        public Boolean loaded { get; set; }
+
         protected Microsoft.Extensions.Logging.ILogger Logger { get; private set; }
 
         public static ILoggerFactory LoggerFactory { get; private set; }
+
+        public Dictionary<int, ShadedElement> elements;
+        public List<ShadedElement> elementsList;
+
+        public Dictionary<int, Area> areas;
+        public List<Area> areasList;
+
+        public Dictionary<int, PipeSystem> systems;
+        public List<PipeSystem> systemsList;
+
+        public Dictionary<string, List<int>> elementsByAreaKey;
+        public Dictionary<string, List<int>> elementsBySystemKey;
 
         public ILoggerFactory GetLoggerFactory()
 		{
             return LoggerFactory;
 		}
+
+        public ShadedElement getElement(int id)
+        {
+            if(elements.ContainsKey(id))
+            {
+                return elements[id];
+            }
+            else
+            {
+                return null;
+            }
+            
+        }
 
 
         /// <summary>
@@ -94,6 +127,7 @@ namespace XbimXplorer
             return _openedModelFileName;
         }
 
+     
         private void SetOpenedModelFileName(string ifcFilename)
         {
             _openedModelFileName = ifcFilename;
@@ -101,8 +135,8 @@ namespace XbimXplorer
             Dispatcher.BeginInvoke(new Action(delegate
             {
                 Title = string.IsNullOrEmpty(ifcFilename)
-                    ? "Xbim Xplorer" :
-                    "Xbim Xplorer - [" + ifcFilename + "]";
+                    ? "IE BIM" :
+                    "IE BIM - [" + ifcFilename + "]";
             }));
         }
 
@@ -112,9 +146,11 @@ namespace XbimXplorer
         private LogEventLevel LoggingLevel { get => Settings.Default.LoggingLevel; }
         private LoggingLevelSwitch loggingLevelSwitch = new LoggingLevelSwitch(LogEventLevel.Debug);
 
+        
 
-        public XplorerMainWindow(bool preventPluginLoad = false)
+        public XplorerMainWindow()
         {
+            loaded = false;
             // So we can use *.xbim files.
             IfcStore.ModelProviderFactory.UseHeuristicModelProvider();
             
@@ -145,7 +181,7 @@ namespace XbimXplorer
 
             InitializeComponent();
 
-            PreventPluginLoad = preventPluginLoad;
+            PreventPluginLoad = false;
 
             // initialise the internal elements of the UI that behave like plugins
             EvaluateXbimUiType(typeof(IfcValidation.ValidationWindow), true);
@@ -191,7 +227,6 @@ namespace XbimXplorer
                 s.AddRange(Settings.Default.MRUFiles.Cast<string>());
 
             _mruFiles = new ObservableMruList<string>(s, 4, StringComparer.InvariantCultureIgnoreCase);
-            MnuRecent.ItemsSource = _mruFiles;
         }
 
         private void AddRecentFile()
@@ -235,8 +270,9 @@ namespace XbimXplorer
             var model = IfcStore.Create(null, XbimSchemaVersion.Ifc2X3, XbimStoreType.InMemoryModel);
             ModelProvider.ObjectInstance = model;
             ModelProvider.Refresh();
-
-            
+            this.WindowStartupLocation = WindowStartupLocation.Manual;
+            this.Left = 1800;
+            this.WindowState = WindowState.Maximized;
 
             TestCRedist();
         }
@@ -253,9 +289,54 @@ namespace XbimXplorer
         {
             CloseAndDeleteTemporaryFiles();
         }
+
+        
         
         public XbimDBAccess FileAccessMode { get; set; } = XbimDBAccess.Read;
-        
+        private static void PrintHierarchy(IIfcObjectDefinition o, int level)
+        {
+            Console.WriteLine(string.Format("{0}{1} [{2}]", GetIndent(level), o.Name, o.GetType().Name));
+
+            //only spatial elements can contain building elements
+            var spatialElement = o as IIfcSpatialStructureElement;
+            if (spatialElement != null)
+            {
+                //using IfcRelContainedInSpatialElement to get contained elements
+                var containedElements = spatialElement.ContainsElements.SelectMany(rel => rel.RelatedElements);
+                foreach (var element in containedElements)
+                    Console.WriteLine(string.Format("{0}    ->{1} [{2}]", GetIndent(level), element.Name, element.GetType().Name));
+            }
+
+            //using IfcRelAggregares to get spatial decomposition of spatial structure elements
+            foreach (var item in o.IsDecomposedBy.SelectMany(r => r.RelatedObjects))
+                PrintHierarchy(item, level + 1);
+        }
+
+        private static string GetIndent(int level)
+        {
+            var indent = "";
+            for (int i = 0; i < level; i++)
+                indent += "  ";
+            return indent;
+        }
+
+        private void addColours(IfcStore model)
+        {
+            using (model)
+            {
+                var baseSurfaceStyles = model.Instances.OfType<IIfcColourRgb>();
+                foreach (var style in baseSurfaceStyles)
+                {
+                    using (var txn = model.BeginTransaction("Change shading colour"))
+                    {
+                        style.Red = (0.0 / 255.0);
+                        style.Green = (0.0 / 255.0);
+                        style.Blue = (255.0 / 255.0);
+                        txn.Commit();
+                    }
+                }
+            }
+        }
         private void OpenAcceptableExtension(object s, DoWorkEventArgs args)
         {
             var worker = s as BackgroundWorker;
@@ -266,7 +347,26 @@ namespace XbimXplorer
                     throw new Exception("Background thread could not be accessed");
                 _temporaryXbimFileName = Path.GetTempFileName();
                 SetOpenedModelFileName(selectedFilename);
-                var model = IfcStore.Open(selectedFilename, null, null, worker.ReportProgress, FileAccessMode);
+
+                var editor = new XbimEditorCredentials
+                {
+                    ApplicationDevelopersName = "You",
+                    ApplicationFullName = "Your app",
+                    ApplicationIdentifier = "Your app ID",
+                    ApplicationVersion = "1.0",
+                    //your user
+                    EditorsFamilyName = "",
+                    EditorsGivenName = "",
+                    EditorsOrganisationName = ""
+                };
+                var model = IfcStore.Open(selectedFilename, editor, null, worker.ReportProgress, FileAccessMode);
+
+                //addColours(model);
+
+                //var project = model.Instances.FirstOrDefault<IIfcProject>();
+                //PrintHierarchy(project, 0);
+
+
                 if (_meshModel)
                 {
                     ApplyWorkarounds(model);
@@ -383,17 +483,221 @@ namespace XbimXplorer
             if (dlg != null) LoadAnyModel(dlg.FileName);
         }
 
+
+
+        public void loadElements(string filename)
+        {
+            var workbookName = Path.ChangeExtension(filename, ".xlsx");
+
+
+            //DataTable elementInfor = LoadWorksheetInDataTable(workbookName, "Component");
+            DataTable elementInfor = loadWorksheet(workbookName, "Component");
+            DataTable systemInfor = loadWorksheet(workbookName, "System");
+            DataTable spaceInfor = loadWorksheet(workbookName, "Space");
+
+            Dictionary<string, string> systemRefDict = new Dictionary<string, string>();
+
+            elementsByAreaKey = new Dictionary<string, List<int>>();
+            elementsBySystemKey = new Dictionary<string, List<int>>();
+
+            systems = new Dictionary<int, PipeSystem>();
+            systemsList = new List<PipeSystem>();
+
+            foreach (DataRow component in systemInfor.Rows)
+            {
+                string SystemName = component["Name"].ToString();
+                string ComponentName = component["ComponentNames"].ToString();
+                int ExtIdentifier = Convert.ToInt32(component["ExtIdentifier"]);
+
+                if (systemRefDict.ContainsKey(ComponentName))
+                {
+                    String currSystem = systemRefDict[ComponentName];
+                    systemRefDict.Remove(ComponentName);
+                    systemRefDict.Add(ComponentName, currSystem + "; " + SystemName);
+                }
+                else
+                {
+                    systemRefDict.Add(ComponentName, SystemName);
+                }
+
+                if (!systems.ContainsKey(ExtIdentifier))
+                {
+                    PipeSystem sys = new PipeSystem()
+                    {
+                        Name = SystemName,
+                        ExtIdentifier = ExtIdentifier
+                    };
+                    systems.Add(ExtIdentifier, sys);
+                    systemsList.Add(sys);
+                }
+
+            }
+
+            areas = new Dictionary<int, Area>();
+            areasList = new List<Area>();
+
+            foreach (DataRow component in spaceInfor.Rows)
+            {
+                string AreaName = component["Name"].ToString();
+                int ExtIdentifier = Convert.ToInt32(component["ExtIdentifier"]);
+
+                if (!areas.ContainsKey(ExtIdentifier))
+                {
+                    Area area = new Area()
+                    {
+                        Name = AreaName,
+                        ExtIdentifier = ExtIdentifier
+                    };
+                    areas.Add(ExtIdentifier, area);
+                    areasList.Add(area);
+                }
+            }
+
+
+            int count = 0;
+            elements = new Dictionary<int, ShadedElement>();
+            elementsList = new List<ShadedElement>();
+
+            foreach (DataRow component in elementInfor.Rows)
+            {
+                string Name = component["Name"].ToString();
+                string TypeName = component["TypeName"].ToString();
+                string Space = component["Space"].ToString();
+                string ExtObject = component["ExtObject"].ToString();
+                int ExtIdentifier = Convert.ToInt32(component["ExtIdentifier"]);
+                string InstallationDate = component["InstallationDate"].ToString();
+                string System = systemRefDict.ContainsKey(Name) ? systemRefDict[Name] : "";
+
+                ShadedElement el = new ShadedElement()
+                {
+                    Name = Name,                        //Description
+                    TypeName = TypeName,                //Type
+                    Space = Space,                      //Area
+                    ExtObject = ExtObject,              //Object
+                    ExtIdentifier = ExtIdentifier,      //ID
+                    System = System, //System
+                    InstallationDate = InstallationDate,
+                    currCriticality = (ShadedElement.criticality)(count % 6)
+                };
+
+                if(elementsByAreaKey.ContainsKey(Space))
+                {
+                    elementsByAreaKey[Space].Add(ExtIdentifier);
+                }
+                else
+                {
+                    List<int> firstIDList = new List<int>
+                    {
+                        ExtIdentifier
+                    };
+
+                    elementsByAreaKey.Add(Space, firstIDList);
+                }
+
+                if (elementsBySystemKey.ContainsKey(System))
+                {
+                    elementsBySystemKey[System].Add(ExtIdentifier);
+                }
+                else
+                {
+                    List<int> firstIDList = new List<int>
+                    {
+                        ExtIdentifier
+                    };
+
+                    elementsBySystemKey.Add(System, firstIDList);
+                }
+
+
+
+                elements.Add(ExtIdentifier, el);
+                elementsList.Add(el);
+                count++;
+            }
+
+        }
+
+        private DataTable loadWorksheet(string filePath, string sheetName)
+        {
+            FileStream stream = File.Open(filePath, FileMode.Open, FileAccess.Read);
+
+            //...
+            //2. Reading from a OpenXml Excel file (2007 format; *.xlsx)
+            IExcelDataReader excelReader = ExcelReaderFactory.CreateOpenXmlReader(stream);
+            //...
+            //3. DataSet - The result of each spreadsheet will be created in the result.Tables
+            DataSet result = excelReader.AsDataSet(new ExcelDataSetConfiguration()
+            {
+                ConfigureDataTable = (_) => new ExcelDataTableConfiguration()
+                {
+                    UseHeaderRow = true
+                }
+            });
+            DataTable test = result.Tables[sheetName];
+            
+            excelReader.Close();
+            return test;
+        }
+
+        private DataTable LoadWorksheetInDataTable(string fileName, string sheetName)
+        {
+            DataTable sheetData = new DataTable();
+            using (OleDbConnection conn = this.returnConnection(fileName))
+            {
+                conn.Open();
+                // retrieve the data using data adapter
+                OleDbDataAdapter sheetAdapter = new OleDbDataAdapter("select * from [" + sheetName + "$]", conn);
+                sheetAdapter.Fill(sheetData);
+                conn.Close();
+            }
+            return sheetData;
+        }
+
+        private OleDbConnection returnConnection(string fileName)
+        {
+            return new OleDbConnection("Provider=Microsoft.ACE.OLEDB.12.0;Data Source=" + fileName + ";Extended Properties=Excel 12.0;");
+        }
+
+
+        public void updateSelectedItem(int id)
+        {
+            foreach(var projects in Model.Instances.OfType<IIfcProject>())
+            {
+                Console.WriteLine("1 "+projects.EntityLabel);
+                foreach (var building in projects.Buildings)
+                {
+                    Console.WriteLine("2 " + "\t" +building.EntityLabel);
+                    foreach (var storey in building.BuildingStoreys)
+                    {
+                        Console.WriteLine("3 " + "\t\t" + storey.EntityLabel);
+                        foreach (var elementContainer in storey.ContainsElements)
+                        {
+                            Console.WriteLine("4 " + "\t\t\t" + elementContainer.EntityLabel);
+                            foreach (var element in elementContainer.RelatedElements)
+                            {
+                                Console.WriteLine("5 " + "\t\t\t\t" + element.EntityLabel);
+                            }
+                        }
+                    }
+                }
+            }
+            //SpatialControl.ViewSpatialStructure();
+            //SelectedItem = ;
+        }
         /// <summary>
         /// 
         /// </summary>
         /// <param name="modelFileName"></param>
         public void LoadAnyModel(string modelFileName)
         {
+            loadElements(modelFileName);
+
             var fInfo = new FileInfo(modelFileName);
             if (!fInfo.Exists) // file does not exist; do nothing
                 return;
             if (fInfo.FullName.ToLower() == GetOpenedModelFileName()) //same file do nothing
                 return;
+
 
             // there's no going back; if it fails after this point the current file should be closed anyway
             CloseAndDeleteTemporaryFiles();
@@ -459,6 +763,7 @@ namespace XbimXplorer
                 ProgressBar.Value = 0;
                 StatusMsg.Text = "Ready";
                 AddRecentFile();
+                loaded = true;
             }
             else //we have a problem
             {
@@ -865,7 +1170,7 @@ namespace XbimXplorer
         /// </summary>
         private bool _simpleFastExtrusion = false;
 
-        private void SpatialControl_MouseDoubleClick(object sender, MouseButtonEventArgs e)
+        public void SpatialControl_MouseDoubleClick(object sender, MouseButtonEventArgs e)
         {
             _camChanged = false;
             DrawingControl.Viewport.Camera.Changed += Camera_Changed;
@@ -1004,32 +1309,14 @@ namespace XbimXplorer
             OpenOrFocusPluginWindow(typeof (LogViewer.LogViewer));
         }
 
-        private void Exit(object sender, RoutedEventArgs e)
-        {
-            // todo: should we persist UI appearence across sessions?
-#if PERSIST_UI
-            // experiment
-            using (var fs = new StringWriter())
-            {
-                var xmlLayout = new XmlLayoutSerializer(DockingManager);
-                xmlLayout.Serialize(fs);
-                var xmlLayoutString = fs.ToString();
-                Clipboard.SetText(xmlLayoutString);
-            }
-#endif
-            Close();
-        }
-
         /// <summary>
         /// this event is run after the window is fully rendered.
         /// </summary>
         private void RenderedEvents(object sender, EventArgs e)
         {
             // command line arg can prevent plugin loading
-            if (Settings.Default.PluginStartupLoad && !PreventPluginLoad)
-                RefreshPlugins();
+            //When viewer is loaded
             ConnectStylerFeedBack();
-
         }
         
         private void EntityLabel_KeyDown()
@@ -1153,32 +1440,7 @@ namespace XbimXplorer
             DrawingControl.ReloadModel();
         }
 
-        private void CommandBoxLost(object sender, RoutedEventArgs e)
-        {
-            CommandBox.Visibility = Visibility.Collapsed;
-        }
-
-        private void CommandBoxEval(object sender, KeyEventArgs e)
-        {
-            if (e.Key == Key.Enter)
-            {
-                CommandBox.Visibility = Visibility.Collapsed;
-
-                var cmd = CommandPrompt.Text;
-                if (string.IsNullOrWhiteSpace(cmd))
-                    return;
-                Type t = typeof(Commands.wdwCommands);
-                var opened = OpenOrFocusPluginWindow(t) as Commands.wdwCommands;
-                opened.Execute(cmd);
-            }
-        }
-
-        private void ShowCommandBox(object sender, RoutedEventArgs e)
-        {
-            CommandBox.Visibility = Visibility.Visible;
-            CommandPrompt.Focus();
-        }
-
+      
 		private void SetRandomStyler(object sender, RoutedEventArgs e)
 		{
             DrawingControl.DefaultLayerStyler = new RandomColorStyler(Logger);
@@ -1186,5 +1448,86 @@ namespace XbimXplorer
             DrawingControl.ReloadModel();
 
         }
-	}
+
+        private void SetCriticalityStyler(object sender, RoutedEventArgs e)
+        {
+            CriticalityStyler cs = new CriticalityStyler(Logger);
+            cs.setElements(elements);
+            DrawingControl.DefaultLayerStyler = cs;
+            ConnectStylerFeedBack();
+            DrawingControl.ReloadModel();
+        }
+
+        public void RefreshPlugins()
+        {
+            //throw new NotImplementedException();
+        }
+
+
+        public void Highlight(List<int> ret)
+        {
+            SelectedItem = null;
+            EntitySelection s = new EntitySelection();
+            foreach (var item in ret)
+            {
+                s.Add(Model.Instances[item]);
+            }
+            DrawingControl.Selection = s;
+            DrawingControl.ZoomSelected();
+        }
+        public void Highlight(int id)
+        {
+            SelectedItem = null;
+            DrawingControl.Selection = new EntitySelection
+            {
+                Model.Instances[id]
+            };
+            DrawingControl.ZoomSelected();
+        }
+
+        public void HighlightArea(string areaName)
+        {
+            SelectedItem = null;
+            if (areaName.Length > 0 && elementsByAreaKey.ContainsKey(areaName) && elementsByAreaKey[areaName].Count < 50)
+            {
+                EntitySelection s = new EntitySelection();
+                foreach (var item in elementsByAreaKey[areaName])
+                {
+                    s.Add(Model.Instances[item]);
+                }
+                lastSelectedGroup = areaName;
+                DrawingControl.Selection = s;
+                DrawingControl.ZoomSelected();
+            }
+            
+        }
+
+        public void HighlightSystem(string systemName)
+        {
+            SelectedItem = null;
+            if(systemName.Length > 0 && elementsBySystemKey.ContainsKey(systemName) && elementsBySystemKey[systemName].Count < 50)
+            {
+                EntitySelection s = new EntitySelection();
+                foreach (var item in elementsBySystemKey[systemName])
+                {
+                    s.Add(Model.Instances[item]);
+                }
+                lastSelectedGroup = systemName;
+                DrawingControl.Selection = s;
+                DrawingControl.ZoomSelected();
+            }
+        }
+
+        public EntitySelection getSelection()
+        {
+            return DrawingControl.Selection;
+        }
+
+        public string getLastGroupSelected()
+        {
+            return lastSelectedGroup;
+        }
+
+
+    }
 }

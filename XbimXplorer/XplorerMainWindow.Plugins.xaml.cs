@@ -15,6 +15,7 @@ using XbimXplorer.PluginSystem;
 using Xceed.Wpf.AvalonDock.Layout;
 using Image = System.Windows.Controls.Image;
 using Microsoft.Extensions.Logging;
+using System.ComponentModel;
 
 namespace XbimXplorer
 {
@@ -31,22 +32,8 @@ namespace XbimXplorer
             }
         }
 
-        public Visibility PluginMenuVisibility =>
-            PluginMenu.Items.Count == 0
-                ? Visibility.Collapsed
-                : Visibility.Visible;
-
-        public void RefreshPlugins()
-        {
-            var dirs = PluginManagement.GetPluginDirectories();
-            foreach (var dir in dirs)
-            {
-                // evaluate the loading of the plugin from a folder
-                LoadPlugin(dir, false);
-            }
-            PluginMenu.Visibility = PluginMenuVisibility;
-        }
-
+       
+       
         private string _assemblyLoadFolder = "";
 
         /// <summary>
@@ -188,21 +175,7 @@ namespace XbimXplorer
                 }
             }
             // set UI visibility
-            try
-            {
-                foreach (var tp in types)
-                {
-                    EvaluateXbimUiType(tp, false);
-                }
-            }
-            catch (Exception ex)
-            {
-                Logger.LogError(0, ex, "Error activating plugin {plugin}; startup mode set to 'Disabled'.", mfst.Id);
-                PluginManagement.SetStartup(dir, PluginConfiguration.StartupBehaviour.Disabled);
-                PluginMenu.Visibility = PluginMenuVisibility;
-                return false;
-            }
-            PluginMenu.Visibility = PluginMenuVisibility;
+          
             return true;
         }
 
@@ -257,23 +230,11 @@ namespace XbimXplorer
             if (string.IsNullOrEmpty(att?.MenuText))
                 return;
             Logger.LogDebug($"Menu: {att.MenuText}");
-            var destMenu = PluginMenu;
             var menuHeader = type.Name;
             if (!string.IsNullOrEmpty(att.MenuText))
             {
                 menuHeader = att.MenuText;
             }
-            if (att.MenuText.StartsWith(@"View/Developer/"))
-            {
-                menuHeader = menuHeader.Substring(15);
-                destMenu = DeveloperMenu;
-            }
-            if (att.MenuText.StartsWith(@"File/Export/"))
-            {
-                menuHeader = menuHeader.Substring(12);
-                destMenu = ExportMenu;
-            }
-
             var v = new MenuItem {Header = menuHeader, Tag = type};
             if (att.IconPath != "")
             {
@@ -290,14 +251,7 @@ namespace XbimXplorer
                     Logger.LogError(0, ex, "Path {iconPath} not found when loading icon.", att.IconPath);
                 }                
             }
-            if (InsertAtTopOfMenu)
-            {
-                destMenu.Items.Insert(0, v);
-            }
-            else
-            {
-                destMenu.Items.Add(v);
-            }
+           
             v.Click += OpenPluginWindow;
             
         }
@@ -528,6 +482,11 @@ namespace XbimXplorer
             return _loadedPlugins.ContainsKey(pluginId) 
                 ? _loadedPlugins[pluginId].Version 
                 : null;
+        }
+        protected override void OnClosing(CancelEventArgs e)
+        {
+            e.Cancel = true;  // cancels the window close    
+            this.Hide();      // Programmatically hides the window
         }
     }
 }

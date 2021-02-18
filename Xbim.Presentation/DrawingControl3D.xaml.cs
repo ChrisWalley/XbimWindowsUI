@@ -68,6 +68,7 @@ namespace Xbim.Presentation
         protected ModelVisual3D Transparents;
         protected ModelVisual3D Extras;
         protected GridLinesVisual3D GridLines;
+        
 
         public ModelVisual3D OpaquesVisual3D => Opaques;
 
@@ -1106,7 +1107,7 @@ namespace Xbim.Presentation
             {
                 if (SelectionBehaviour == SelectionBehaviours.MultipleSelection)
                 {
-                    m = WpfMeshGeometry3D.GetGeometry(Selection, ModelPositions, mat);
+                        m = WpfMeshGeometry3D.GetGeometry(Selection, ModelPositions, mat);
                 }
                 else if (newVal != null) // single element selection, requires the newval to get the model
                 {
@@ -1168,7 +1169,7 @@ namespace Xbim.Presentation
                 return;
             if ((bool) e.NewValue)
                 d3D.Viewport.Children.Insert(0, d3D.GridLines);
-            else
+            else 
                 d3D.Viewport.Children.Remove(d3D.GridLines);
         }
 
@@ -1654,7 +1655,7 @@ namespace Xbim.Presentation
         public void ZoomSelected()
         {
             if (SelectedEntity == null || Highlighted.Content == null || Highlighted.Content.Bounds.IsEmpty)
-                return;
+                    return;
             var r3D = Highlighted.Content.Bounds;
             ZoomTo(r3D);
         }

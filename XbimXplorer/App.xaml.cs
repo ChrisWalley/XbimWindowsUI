@@ -43,14 +43,7 @@ namespace XbimXplorer
         protected override void OnStartup(StartupEventArgs e)
         {
             // evaluate special parameters before loading MainWindow
-            var blockPlugin = false;
-            foreach (var thisArg in e.Args)
-            {
-                if (string.Compare("/noplugins", thisArg, StringComparison.OrdinalIgnoreCase) == 0)
-                {
-                    blockPlugin = true;
-                }
-            }
+            
 
             // see if an update of settings is required from a previous version of the app.
             // this will allow to retain the configuration across versions, it is useful for the squirrel installer
@@ -62,7 +55,7 @@ namespace XbimXplorer
                 Settings.Default.Save();
             }
 
-            var mainView = new XplorerMainWindow(blockPlugin);
+            var mainView = new XplorerMainWindow();
             mainView.Show();
             mainView.DrawingControl.ViewHome();
             var bOneModelLoaded = false;
